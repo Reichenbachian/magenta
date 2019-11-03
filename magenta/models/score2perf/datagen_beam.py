@@ -34,11 +34,15 @@ from magenta.protobuf import music_pb2
 import numpy as np
 from tensor2tensor.data_generators import generator_utils
 import tensorflow as tf
-import typing
+import typing, sys
+from apache_beam.options.pipeline_options import DirectOptions
+from apache_beam.portability import python_urns
+from apache_beam.portability.api import beam_runner_api_pb2
+from apache_beam.runners.portability import fn_api_runner
 
 # TODO(iansimon): this should probably be defined in the problem
 SCORE_BPM = 120.0
-
+NUM_THREADS = 7
 # Shortcut to beat annotation.
 BEAT = music_pb2.NoteSequence.TextAnnotation.BEAT
 
@@ -395,7 +399,7 @@ def generate_examples(input_transform, output_dir, problem_name, splits,
           'Split probabilities must be provided if input is not presplit.')
     split_names, split_probabilities = zip(*splits.items())
     cumulative_splits = list(zip(split_names, np.cumsum(split_probabilities)))
-    if cumulative_splits[-1][1] != 1.0:
+    if round(cumulative_splits[-1][1], 4) != 1.0:
       raise ValueError('Split probabilities must sum to 1; got %f' %
                        cumulative_splits[-1][1])
 
@@ -415,10 +419,15 @@ def generate_examples(input_transform, output_dir, problem_name, splits,
       for filename in existing_output_filenames:
         tf.gfile.Remove(filename)
 
-  pipeline_options = beam.options.pipeline_options.PipelineOptions(
-      FLAGS.pipeline_options.split(','))
+  pipeline_options = beam.options.pipeline_options.PipelineOptions(FLAGS.pipeline_options.split(','))
+  pipeline_options.view_as(DirectOptions).direct_num_workers = NUM_THREADS
 
-  with beam.Pipeline(options=pipeline_options) as p:
+  with beam.Pipeline(options=pipeline_options,
+                     runner=fn_api_runner.FnApiRunner(
+                        default_environment=beam_runner_api_pb2.Environment(
+                          urn=python_urns.SUBPROCESS_SDK,
+                          payload=b'%s -m apache_beam.runners.worker.sdk_worker_main'
+                          % sys.executable.encode('ascii')))) as p:
     if isinstance(input_transform, dict):
       # Input data is already partitioned into splits.
       split_partitions = [
@@ -607,6 +616,7 @@ def generate_perf_examples(input_transform, output_dir, problem_name, splits,
           for split_name in split_names
       ]
     else:
+      print(input_transform)
       # Read using a single PTransform.
       p |= 'input_transform' >> input_transform
       split_partitions = p | 'partition' >> beam.Partition(
